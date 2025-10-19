@@ -96,3 +96,36 @@ export async function loadEndpointsFromFile(
     }
   }
 }
+
+/**
+ * Save endpoints to a JSON file
+ *
+ * @param filePath - Path to the endpoints JSON file
+ * @param endpoints - Array of endpoint configurations to save
+ */
+export async function saveEndpointsToFile(
+  filePath: string,
+  endpoints: any[]
+): Promise<void> {
+  try {
+    const fileContent = JSON.stringify(endpoints, null, 2);
+    await fs.writeFile(filePath, fileContent, "utf-8");
+    log.info(
+      `[EndpointUtils] Saved ${endpoints.length} endpoint(s) to ${filePath}`
+    );
+  } catch (error: any) {
+    log.error(
+      `[EndpointUtils] Error saving endpoints to file: ${error.message}`
+    );
+    throw error;
+  }
+}
+
+/**
+ * Get the path to the endpoints file
+ *
+ * @returns Path to the endpoints.json file
+ */
+export function getEndpointsFilePath(): string {
+  return process.env.ENDPOINTS_FILE || "endpoints.json";
+}

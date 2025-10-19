@@ -6,7 +6,12 @@
 import { Request, Response } from "express";
 import { DynamicMCPServer } from "../mcp/DynamicMCPServer.js";
 import { EndpointManager } from "../mcp/EndpointManager.js";
-import { createEndpointFromConfig } from "../utils/endpointUtils.js";
+import {
+  createEndpointFromConfig,
+  saveEndpointsToFile,
+  getEndpointsFilePath,
+} from "../utils/endpointUtils.js";
+import path from "path";
 
 // Configure logging
 const log = {
@@ -27,6 +32,19 @@ export async function addEndpoint(
     const endpoint = createEndpointFromConfig(req.body);
     dynamicServer.addEndpoint(endpoint);
 
+    // Save to file for persistence
+    const endpointManager = dynamicServer.getEndpointManager();
+    const allEndpoints = endpointManager.listEndpoints();
+    const filePath = path.resolve(process.cwd(), getEndpointsFilePath());
+
+    try {
+      await saveEndpointsToFile(filePath, allEndpoints);
+    } catch (saveError: any) {
+      log.warning(
+        `[EndpointController] Failed to persist endpoint to file: ${saveError.message}`
+      );
+    }
+
     log.info(
       `[EndpointController] Successfully added endpoint '${endpoint.name}'`
     );
@@ -39,6 +57,13 @@ export async function addEndpoint(
         method: endpoint.method,
       },
     });
+
+    setTimeout(() => {
+      log.info(
+        "[EndpointController] Restarting server to register new tool..."
+      );
+      process.exit(0); // Process manager (like pm2, nodemon) will restart
+    }, 2000);
   } catch (error: any) {
     log.error(`[EndpointController] Error adding endpoint: ${error.message}`);
     res.status(400).json({
@@ -71,6 +96,18 @@ export async function removeEndpoint(
     const removed = dynamicServer.removeEndpoint(endpointName);
 
     if (removed) {
+      const endpointManager = dynamicServer.getEndpointManager();
+      const allEndpoints = endpointManager.listEndpoints();
+      const filePath = path.resolve(process.cwd(), getEndpointsFilePath());
+
+      try {
+        await saveEndpointsToFile(filePath, allEndpoints);
+      } catch (saveError: any) {
+        log.warning(
+          `[EndpointController] Failed to persist endpoint removal to file: ${saveError.message}`
+        );
+      }
+
       log.info(
         `[EndpointController] Successfully removed endpoint '${endpointName}'`
       );

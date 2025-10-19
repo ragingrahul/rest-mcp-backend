@@ -14,6 +14,7 @@ import { EndpointManager } from "./mcp/EndpointManager.js";
 import { loadEndpointsFromFile } from "./utils/endpointUtils.js";
 import { createEndpointRoutes } from "./routes/endpointRoutes.js";
 import { createHealthRoutes } from "./routes/healthRoutes.js";
+import { createAuthRoutes } from "./routes/authRoutes.js";
 import path from "path";
 import { fileURLToPath } from "url";
 
@@ -89,17 +90,42 @@ async function main(): Promise<void> {
   });
 
   // Setup REST API routes AFTER MCP connection
+  // Authentication routes (public)
+  app.use("/api/auth", createAuthRoutes());
+
+  // Endpoint management routes (protected with authentication)
   app.use(
     "/api/endpoints",
     createEndpointRoutes(endpointManager, dynamicServer)
   );
+
+  // Health check routes (public)
   app.use("/health", createHealthRoutes(endpointManager, dynamicServer));
 
   // Start the server
   app.listen(port, host, () => {
     log.info(`[DynamicHTTP] Dynamic MCP Server started on ${host}:${port}`);
     log.info("[DynamicHTTP] Available endpoints:");
-    log.info(`[DynamicHTTP]   - POST http://${host}:${port}/ (MCP protocol)`);
+    log.info(
+      `[DynamicHTTP]   - POST http://${host}:${port}/ (MCP protocol - no auth)`
+    );
+    log.info("[DynamicHTTP] Authentication endpoints:");
+    log.info(
+      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/signup (Register)`
+    );
+    log.info(
+      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/login (Login)`
+    );
+    log.info(
+      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/refresh (Refresh token)`
+    );
+    log.info(
+      `[DynamicHTTP]   - GET http://${host}:${port}/api/auth/profile (Get profile - requires auth)`
+    );
+    log.info(
+      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/logout (Logout - requires auth)`
+    );
+    log.info("[DynamicHTTP] Endpoint management (requires auth):");
     log.info(
       `[DynamicHTTP]   - POST http://${host}:${port}/api/endpoints (Add endpoint)`
     );

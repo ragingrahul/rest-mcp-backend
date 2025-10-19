@@ -5,3 +5,4 @@
 
 export { createEndpointRoutes } from "./endpointRoutes.js";
 export { createHealthRoutes } from "./healthRoutes.js";
+export { createAuthRoutes } from "./authRoutes.js";
