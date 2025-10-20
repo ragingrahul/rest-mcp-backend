@@ -4,7 +4,6 @@
  */
 
 import { supabase, getSupabaseWithAuth } from "./supabase.js";
-import { createClient } from "@supabase/supabase-js";
 import {
   APIEndpoint,
   EndpointRecord,
@@ -190,33 +189,15 @@ export async function getEndpointsByUserId(
 }
 
 /**
- * Get all endpoints for a user (server-side with service role key)
- * This bypasses RLS and is used for server initialization
+ * Get all endpoints for a user (public read via RLS)
+ * Uses anon key with public SELECT policy - no auth needed for reading
+ * This is used for server initialization to load endpoints for MCP servers
  */
 export async function getEndpointsByUserIdServerSide(
   userId: string
 ): Promise<APIEndpoint[]> {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl || !serviceRoleKey) {
-    const errorMsg =
-      "Service role key not configured for server-side operations";
-    log.error(errorMsg);
-    throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY is required for server-side endpoint loading"
-    );
-  }
-
-  // Create client with service role key (bypasses RLS)
-  const serviceClient = createClient(supabaseUrl, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-
-  const { data, error } = await serviceClient
+  // Use anon client - RLS allows public SELECT on endpoints (marketplace model)
+  const { data, error } = await supabase
     .from("endpoints")
     .select("*")
     .eq("user_id", userId)
@@ -224,7 +205,7 @@ export async function getEndpointsByUserIdServerSide(
 
   if (error) {
     log.error(
-      `Failed to fetch endpoints (server-side): ${error.message}`,
+      `Failed to fetch endpoints for user ${userId}: ${error.message}`,
       error
     );
     throw new Error(`Failed to fetch endpoints: ${error.message}`);
@@ -314,29 +295,11 @@ export async function getEndpointCount(
 
 /**
  * Get all users who have endpoints (for server initialization)
- * Uses service role key to bypass RLS
+ * Uses anon key with public SELECT policy - marketplace model allows public read
  */
 export async function getAllUsersWithEndpoints(): Promise<string[]> {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl || !serviceRoleKey) {
-    const errorMsg = "Service role key not configured for getting all users";
-    log.error(errorMsg);
-    throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY is required for server initialization"
-    );
-  }
-
-  // Create client with service role key (bypasses RLS)
-  const serviceClient = createClient(supabaseUrl, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  });
-
-  const { data, error } = await serviceClient
+  // Use anon client - RLS allows public SELECT on endpoints (marketplace model)
+  const { data, error } = await supabase
     .from("endpoints")
     .select("user_id")
     .order("user_id");

@@ -37,10 +37,10 @@ DROP POLICY IF EXISTS "Users can update their own endpoints" ON public.endpoints
 DROP POLICY IF EXISTS "Users can delete their own endpoints" ON public.endpoints;
 
 -- RLS Policies: Users can only access their own endpoints
-CREATE POLICY "Users can view their own endpoints"
-    ON public.endpoints
-    FOR SELECT
-    USING (auth.uid() = user_id);
+CREATE POLICY "Anyone can view all endpoints" 
+    ON public.endpoints 
+    FOR SELECT 
+    USING (true);
 
 CREATE POLICY "Users can insert their own endpoints"
     ON public.endpoints
