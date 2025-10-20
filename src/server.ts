@@ -2,21 +2,23 @@
  * Dynamic MCP HTTP Server
  *
  * This server provides:
- * - MCP protocol via Streamable HTTP at POST /
+ * - Per-user MCP servers via Streamable HTTP at /mcp/{userId}
  * - REST API for managing dynamic endpoints
+ * - Authentication system
  * - Health check endpoint
  */
 
 import express from "express";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { DynamicMCPServer } from "./mcp/DynamicMCPServer.js";
-import { EndpointManager } from "./mcp/EndpointManager.js";
-import { loadEndpointsFromFile } from "./utils/endpointUtils.js";
+import { MCPServerRegistry } from "./mcp/MCPServerRegistry.js";
 import { createEndpointRoutes } from "./routes/endpointRoutes.js";
 import { createHealthRoutes } from "./routes/healthRoutes.js";
 import { createAuthRoutes } from "./routes/authRoutes.js";
-import path from "path";
-import { fileURLToPath } from "url";
+import {
+  createMCPRoutes,
+  closeAllTransports,
+  getOrCreateTransport,
+} from "./routes/mcpRoutes.js";
+import { getAllUsersWithEndpoints } from "./services/endpointRepository.js";
 
 // Configure logging
 const log = {
@@ -25,165 +27,204 @@ const log = {
   error: (message: string) => console.error(`[ERROR] ${message}`),
 };
 
-// Initialize the endpoint manager and dynamic MCP server
-const endpointManager = new EndpointManager();
-const dynamicServer = new DynamicMCPServer("dynamic-api-mcp", endpointManager);
-
 /**
- * Main function to start the dynamic MCP HTTP server
+ * Main function to start the MCP marketplace server
  */
 async function main(): Promise<void> {
-  const port = parseInt(process.env.PORT || "8080", 10);
+  const port = parseInt(process.env.PORT || "3000", 10);
   const host = process.env.HOST || "0.0.0.0";
-  const endpointsFile = process.env.ENDPOINTS_FILE || "endpoints.json";
 
-  // Try to load endpoints from file
-  const endpointsPath = path.resolve(process.cwd(), endpointsFile);
-  await loadEndpointsFromFile(endpointsPath, dynamicServer);
+  log.info("[Server] Initializing MCP Marketplace Server...");
+
+  // Initialize the MCP server registry
+  const registry = new MCPServerRegistry();
+
+  // Load all users with endpoints and initialize their servers
+  try {
+    const userIds = await getAllUsersWithEndpoints();
+    log.info(`[Server] Found ${userIds.length} users with endpoints`);
+
+    if (userIds.length > 0) {
+      await registry.initializeAllServers(userIds);
+    }
+  } catch (error: any) {
+    log.warning(
+      `[Server] Could not load endpoints from database: ${error.message}`
+    );
+    log.warning("[Server] Starting with empty registry");
+  }
 
   // Create Express app
   const app = express();
 
-  // Don't parse JSON for MCP protocol endpoint - let transport handle it
+  // Conditional JSON parsing - SKIP for MCP endpoints
   app.use((req, res, next) => {
-    if (req.path === "/" || req.path === "") {
-      // Skip body parsing for MCP endpoint
+    // Don't parse JSON for root MCP endpoint or /mcp/* paths
+    // Let StreamableHTTPServerTransport handle raw streams
+    if (
+      req.path === "/" ||
+      req.path.startsWith("/mcp/") ||
+      req.path.startsWith("/mcp")
+    ) {
       next();
     } else {
-      // Parse JSON for API endpoints
       express.json()(req, res, next);
     }
   });
 
-  // Setup MCP Streamable HTTP transport BEFORE setting up routes
-  const mcpServer = dynamicServer.getServer();
+  // CORS middleware (optional - enable if needed for frontend)
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, OPTIONS"
+    );
+    res.header(
+      "Access-Control-Allow-Headers",
+      "Origin, X-Requested-With, Content-Type, Accept, Authorization"
+    );
 
-  // Register capabilities before connecting
-  mcpServer.server.registerCapabilities({
-    tools: {
-      listChanged: true, // Enable tool list change notifications
-    },
-  });
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined, // Stateless mode
-    enableJsonResponse: true, // Use JSON responses
-  });
-
-  // Connect the transport to the MCP server BEFORE handling requests
-  await mcpServer.connect(transport);
-
-  // Mark the server as connected (prevents dynamic tool registration after this point)
-  dynamicServer.markAsConnected();
-
-  // Handle MCP protocol requests (both GET for SSE and POST for messages)
-  app.all("/", async (req, res) => {
-    try {
-      await transport.handleRequest(req as any, res as any);
-    } catch (error: any) {
-      log.error(`[DynamicHTTP] Error handling MCP request: ${error.message}`);
-      res.status(500).json({
-        error: "Internal server error",
-        message: error.message,
-      });
+    if (req.method === "OPTIONS") {
+      res.sendStatus(200);
+      return;
     }
+
+    next();
   });
 
-  // Setup REST API routes AFTER MCP connection
+  // Setup routes
   // Authentication routes (public)
   app.use("/api/auth", createAuthRoutes());
 
   // Endpoint management routes (protected with authentication)
-  app.use(
-    "/api/endpoints",
-    createEndpointRoutes(endpointManager, dynamicServer)
-  );
+  app.use("/api/endpoints", createEndpointRoutes(registry));
+
+  // MCP routes (includes both public MCP endpoints and protected connection info)
+  app.use(createMCPRoutes(registry));
 
   // Health check routes (public)
-  app.use("/health", createHealthRoutes(endpointManager, dynamicServer));
+  app.use("/health", createHealthRoutes());
+
+  // Root MCP endpoint - serves default user's MCP server
+  app.all("/", async (req, res) => {
+    try {
+      // Get default user ID from environment or use the first user with endpoints
+      let defaultUserId = process.env.DEFAULT_MCP_USER_ID;
+
+      if (!defaultUserId) {
+        // If no default, use the first active user
+        const activeUsers = registry.getActiveUserIds();
+        if (activeUsers.length > 0) {
+          defaultUserId = activeUsers[0];
+          log.info(
+            `[Server] Using first active user as default: ${defaultUserId}`
+          );
+        } else {
+          // No users with endpoints yet
+          res.status(503).json({
+            error: "No MCP servers available",
+            message: "Please add endpoints first via POST /api/endpoints",
+            help: {
+              signup: "POST /api/auth/signup",
+              login: "POST /api/auth/login",
+              add_endpoint: "POST /api/endpoints (requires auth)",
+            },
+          });
+          return;
+        }
+      }
+
+      // Handle MCP connection for the default user
+      const transport = await getOrCreateTransport(defaultUserId, registry);
+      await transport.handleRequest(req as any, res as any);
+    } catch (error: any) {
+      log.error(`[Server] Error handling root MCP request: ${error.message}`);
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: "Internal server error",
+          message: error.message,
+        });
+      }
+    }
+  });
+
+  // Error handling middleware
+  app.use(
+    (
+      err: any,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      log.error(`[Server] Unhandled error: ${err.message}`);
+      res.status(500).json({
+        success: false,
+        message: "Internal server error",
+        error: process.env.NODE_ENV === "development" ? err.message : undefined,
+      });
+    }
+  );
 
   // Start the server
   app.listen(port, host, () => {
-    log.info(`[DynamicHTTP] Dynamic MCP Server started on ${host}:${port}`);
-    log.info("[DynamicHTTP] Available endpoints:");
+    log.info(`[Server] ✓ MCP Marketplace Server started on ${host}:${port}`);
+    log.info(`[Server] ✓ Active MCP servers: ${registry.getServerCount()}`);
+    log.info("");
+    log.info("[Server] 📚 API Documentation:");
+    log.info("");
+    log.info("  Authentication:");
+    log.info(`    POST   http://${host}:${port}/api/auth/signup`);
+    log.info(`    POST   http://${host}:${port}/api/auth/login`);
     log.info(
-      `[DynamicHTTP]   - POST http://${host}:${port}/ (MCP protocol - no auth)`
-    );
-    log.info("[DynamicHTTP] Authentication endpoints:");
-    log.info(
-      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/signup (Register)`
-    );
-    log.info(
-      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/login (Login)`
-    );
-    log.info(
-      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/refresh (Refresh token)`
+      `    GET    http://${host}:${port}/api/auth/profile (auth required)`
     );
     log.info(
-      `[DynamicHTTP]   - GET http://${host}:${port}/api/auth/profile (Get profile - requires auth)`
+      `    POST   http://${host}:${port}/api/auth/logout (auth required)`
+    );
+    log.info(`    POST   http://${host}:${port}/api/auth/refresh`);
+    log.info("");
+    log.info("  Endpoint Management (auth required):");
+    log.info(`    POST   http://${host}:${port}/api/endpoints`);
+    log.info(`    GET    http://${host}:${port}/api/endpoints`);
+    log.info(`    PUT    http://${host}:${port}/api/endpoints/:id`);
+    log.info(`    DELETE http://${host}:${port}/api/endpoints/:name`);
+    log.info("");
+    log.info("  MCP Connections:");
+    log.info(
+      `    GET    http://${host}:${port}/api/mcp/connection (get your MCP URL)`
     );
     log.info(
-      `[DynamicHTTP]   - POST http://${host}:${port}/api/auth/logout (Logout - requires auth)`
-    );
-    log.info("[DynamicHTTP] Endpoint management (requires auth):");
-    log.info(
-      `[DynamicHTTP]   - POST http://${host}:${port}/api/endpoints (Add endpoint)`
+      `    GET    http://${host}:${port}/mcp/:userId (connect to user's MCP server)`
     );
     log.info(
-      `[DynamicHTTP]   - DELETE http://${host}:${port}/api/endpoints/{name} (Remove endpoint)`
+      `    GET    http://${host}:${port}/mcp/u/:username (connect by username)`
     );
-    log.info(
-      `[DynamicHTTP]   - GET http://${host}:${port}/api/endpoints (List endpoints)`
-    );
-    log.info(
-      `[DynamicHTTP]   - GET http://${host}:${port}/health (Health check)`
-    );
-
-    const endpointNames = endpointManager.listEndpoints().map((e) => e.name);
-    const toolNames = dynamicServer.listTools();
-
-    log.info(
-      `[DynamicHTTP]   - Loaded endpoints: [${endpointNames.join(", ")}]`
-    );
-    log.info(`[DynamicHTTP]   - Available tools: [${toolNames.join(", ")}]`);
-
-    if (toolNames.length === 0) {
-      log.warning(
-        "[DynamicHTTP] No tools available! Claude won't see any tools."
-      );
-    } else {
-      log.info(`[DynamicHTTP] ${toolNames.length} tools ready for Claude`);
-    }
+    log.info(`    POST   http://${host}:${port}/mcp/:userId (call MCP tools)`);
+    log.info("");
+    log.info("  Health:");
+    log.info(`    GET    http://${host}:${port}/health`);
+    log.info("");
   });
 
   // Handle graceful shutdown
   process.on("SIGINT", async () => {
-    log.info("[DynamicHTTP] Dynamic MCP Server shutting down...");
-    await mcpServer.close();
+    log.info("[Server] Shutting down gracefully...");
+    await closeAllTransports();
     process.exit(0);
   });
 
   process.on("SIGTERM", async () => {
-    log.info("[DynamicHTTP] Dynamic MCP Server shutting down...");
-    await mcpServer.close();
+    log.info("[Server] Shutting down gracefully...");
+    await closeAllTransports();
     process.exit(0);
   });
 }
 
-// Get __filename in ES modules
-const __filename = fileURLToPath(import.meta.url);
-
-// Start the server if this is the main module
-// In ES modules, we check if the file is being run directly
-const isMainModule =
-  process.argv[1] === __filename || process.argv[1]?.endsWith("src/server.ts");
-
-if (isMainModule) {
-  main().catch((error) => {
-    log.error(`[DynamicHTTP] Fatal error: ${error.message}`);
-    console.error(error);
-    process.exit(1);
-  });
-}
+// Start the server
+main().catch((error) => {
+  log.error(`[Server] Fatal error: ${error.message}`);
+  console.error(error);
+  process.exit(1);
+});
 
 export { main };

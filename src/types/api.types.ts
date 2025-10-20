@@ -30,6 +30,8 @@ export interface APIParameter {
 }
 
 export interface APIEndpoint {
+  id?: string; // UUID from Supabase
+  user_id?: string; // Owner of the endpoint
   name: string;
   url: string;
   method: HTTPMethod;
@@ -38,4 +40,51 @@ export interface APIEndpoint {
   headers?: Record<string, string>;
   timeout?: number;
   auth?: AuthConfig; // imported from auth.types.ts
+  created_at?: string; // ISO timestamp
+  updated_at?: string; // ISO timestamp
+}
+
+/**
+ * Database representation of endpoint (matches Supabase schema)
+ */
+export interface EndpointRecord {
+  id: string;
+  user_id: string;
+  name: string;
+  url: string;
+  method: string;
+  description: string;
+  parameters: APIParameter[];
+  headers?: Record<string, string>;
+  timeout: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Input type for creating a new endpoint
+ */
+export interface CreateEndpointInput {
+  name: string;
+  url: string;
+  method: HTTPMethod;
+  description: string;
+  parameters: APIParameter[];
+  headers?: Record<string, string>;
+  timeout?: number;
+  auth?: AuthConfig;
+}
+
+/**
+ * Input type for updating an endpoint
+ */
+export interface UpdateEndpointInput {
+  name?: string;
+  url?: string;
+  method?: HTTPMethod;
+  description?: string;
+  parameters?: APIParameter[];
+  headers?: Record<string, string>;
+  timeout?: number;
+  auth?: AuthConfig;
 }

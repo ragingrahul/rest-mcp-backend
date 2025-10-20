@@ -4,9 +4,12 @@
  * and calling dynamic API endpoints, converting them to MCP tools.
  */
 
-import axios, { AxiosInstance, AxiosResponse } from "axios";
 import { APIEndpoint, HTTPMethod } from "../types/api.types.js";
 import { MCPTool } from "../types/mcp.types.js";
+import { IHttpClient } from "../core/interfaces/IHttpClient.js";
+import { ILogger } from "../core/interfaces/ILogger.js";
+import { AxiosHttpClient } from "../infrastructure/http/AxiosHttpClient.js";
+import { LoggerFactory } from "../infrastructure/logging/LoggerFactory.js";
 
 interface ApiResponse {
   success: boolean;
@@ -18,15 +21,15 @@ interface ApiResponse {
 export class EndpointManager {
   private endpoints: Map<string, APIEndpoint>;
   private tools: Map<string, MCPTool>;
-  private httpClient: AxiosInstance;
+  private httpClient: IHttpClient;
+  private logger: ILogger;
 
-  constructor() {
+  constructor(httpClient?: IHttpClient, logger?: ILogger) {
     this.endpoints = new Map();
     this.tools = new Map();
-    this.httpClient = axios.create({
-      validateStatus: () => true, // Don't throw on any status code
-    });
-    console.log("[EndpointManager] Initialized endpoint manager");
+    this.httpClient = httpClient || new AxiosHttpClient();
+    this.logger = logger || LoggerFactory.getLogger("EndpointManager");
+    this.logger.info("Initialized endpoint manager");
   }
 
   /**
@@ -46,8 +49,8 @@ export class EndpointManager {
     const tool = this.createEndpointTool(endpoint);
     this.tools.set(endpoint.name, tool);
 
-    console.log(
-      `[EndpointManager] Added endpoint '${endpoint.name}' as MCP tool (${endpoint.method} ${endpoint.url})`
+    this.logger.info(
+      `Added endpoint '${endpoint.name}' as MCP tool (${endpoint.method} ${endpoint.url})`
     );
   }
 
@@ -114,7 +117,7 @@ export class EndpointManager {
     args: Record<string, any>
   ): Promise<ApiResponse> {
     if (!this.endpoints.has(endpointName)) {
-      console.error(`[EndpointManager] Endpoint '${endpointName}' not found`);
+      this.logger.error(`Endpoint '${endpointName}' not found`);
       return {
         success: false,
         message: `Endpoint '${endpointName}' not found`,
@@ -122,10 +125,7 @@ export class EndpointManager {
     }
 
     const endpoint = this.endpoints.get(endpointName)!;
-    console.log(
-      `[EndpointManager] Calling ${endpoint.method} ${endpoint.url} with args:`,
-      args
-    );
+    this.logger.info(`Calling ${endpoint.method} ${endpoint.url}`, { args });
 
     try {
       // Validate required parameters
@@ -160,8 +160,8 @@ export class EndpointManager {
         }
       }
 
-      // Make HTTP request based on method
-      let response: AxiosResponse;
+      // Make HTTP request using IHttpClient
+      let response;
 
       if (endpoint.method === HTTPMethod.GET) {
         response = await this.httpClient.get(url, {
@@ -169,16 +169,21 @@ export class EndpointManager {
           headers,
           timeout,
         });
-      } else if (
-        endpoint.method === HTTPMethod.POST ||
-        endpoint.method === HTTPMethod.PUT ||
-        endpoint.method === HTTPMethod.PATCH
-      ) {
+      } else if (endpoint.method === HTTPMethod.POST) {
         headers["Content-Type"] = headers["Content-Type"] || "application/json";
-        response = await this.httpClient.request({
-          method: endpoint.method,
-          url,
-          data: args,
+        response = await this.httpClient.post(url, args, {
+          headers,
+          timeout,
+        });
+      } else if (endpoint.method === HTTPMethod.PUT) {
+        headers["Content-Type"] = headers["Content-Type"] || "application/json";
+        response = await this.httpClient.put(url, args, {
+          headers,
+          timeout,
+        });
+      } else if (endpoint.method === HTTPMethod.PATCH) {
+        headers["Content-Type"] = headers["Content-Type"] || "application/json";
+        response = await this.httpClient.patch(url, args, {
           headers,
           timeout,
         });
@@ -199,15 +204,15 @@ export class EndpointManager {
     } catch (error: any) {
       if (error.code === "ECONNABORTED") {
         const errorMsg = `Request to ${endpoint.url} timed out after ${endpoint.timeout || 30} seconds`;
-        console.error(`[EndpointManager] ${errorMsg}`);
+        this.logger.error(errorMsg, error);
         return {
           success: false,
           message: errorMsg,
         };
       }
 
-      console.error(
-        `[EndpointManager] Error calling endpoint '${endpointName}':`,
+      this.logger.error(
+        `Error calling endpoint '${endpointName}': ${error.message}`,
         error
       );
       return {
@@ -221,12 +226,17 @@ export class EndpointManager {
    * Process the HTTP response and return a standardized result
    * This is the equivalent of _process_response from Python
    *
-   * @param response - Axios response object
+   * @param response - HTTP response object
    * @param endpointName - Name of the endpoint that was called
    * @returns Dict containing success status, data, and message
    */
   private async processResponse(
-    response: AxiosResponse,
+    response: {
+      data: any;
+      status: number;
+      statusText: string;
+      headers: Record<string, string>;
+    },
     endpointName: string
   ): Promise<ApiResponse> {
     try {
@@ -234,8 +244,8 @@ export class EndpointManager {
       const statusCode = response.status;
 
       if (statusCode >= 200 && statusCode < 300) {
-        console.log(
-          `[EndpointManager] API call successful: ${endpointName} returned ${statusCode}`
+        this.logger.info(
+          `API call successful: ${endpointName} returned ${statusCode}`
         );
         return {
           success: true,
@@ -244,8 +254,8 @@ export class EndpointManager {
           message: `Successfully called ${endpointName}`,
         };
       } else {
-        console.warn(
-          `[EndpointManager] API call failed: ${endpointName} returned ${statusCode}`
+        this.logger.warning(
+          `API call failed: ${endpointName} returned ${statusCode}`
         );
         return {
           success: false,
@@ -255,8 +265,8 @@ export class EndpointManager {
         };
       }
     } catch (error: any) {
-      console.error(
-        `[EndpointManager] Error processing response from ${endpointName}:`,
+      this.logger.error(
+        `Error processing response from ${endpointName}: ${error.message}`,
         error
       );
       return {
@@ -279,11 +289,9 @@ export class EndpointManager {
     const removed = hadEndpoint || hadTool;
 
     if (removed) {
-      console.log(`[EndpointManager] Removed endpoint '${endpointName}'`);
+      this.logger.info(`Removed endpoint '${endpointName}'`);
     } else {
-      console.warn(
-        `[EndpointManager] Endpoint '${endpointName}' not found for removal`
-      );
+      this.logger.warning(`Endpoint '${endpointName}' not found for removal`);
     }
 
     return removed;

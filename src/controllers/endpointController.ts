@@ -4,21 +4,19 @@
  */
 
 import { Request, Response } from "express";
-import { DynamicMCPServer } from "../mcp/DynamicMCPServer.js";
-import { EndpointManager } from "../mcp/EndpointManager.js";
+import { MCPServerRegistry } from "../mcp/MCPServerRegistry.js";
+import { createEndpointFromConfig } from "../utils/endpointUtils.js";
+import { AuthenticatedRequest } from "../types/auth.types.js";
 import {
-  createEndpointFromConfig,
-  saveEndpointsToFile,
-  getEndpointsFilePath,
-} from "../utils/endpointUtils.js";
-import path from "path";
+  createEndpoint,
+  deleteEndpointByName,
+  getEndpointsByUserId,
+  updateEndpoint,
+} from "../services/endpointRepository.js";
+import { LoggerFactory } from "../infrastructure/logging/LoggerFactory.js";
 
-// Configure logging
-const log = {
-  info: (message: string) => console.log(`[INFO] ${message}`),
-  warning: (message: string) => console.warn(`[WARNING] ${message}`),
-  error: (message: string) => console.error(`[ERROR] ${message}`),
-};
+// Get logger for this controller
+const log = LoggerFactory.getLogger("EndpointController");
 
 /**
  * Add a new API endpoint
@@ -26,46 +24,50 @@ const log = {
 export async function addEndpoint(
   req: Request,
   res: Response,
-  dynamicServer: DynamicMCPServer
+  registry: MCPServerRegistry
 ): Promise<void> {
   try {
-    const endpoint = createEndpointFromConfig(req.body);
-    dynamicServer.addEndpoint(endpoint);
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.id;
 
-    // Save to file for persistence
-    const endpointManager = dynamicServer.getEndpointManager();
-    const allEndpoints = endpointManager.listEndpoints();
-    const filePath = path.resolve(process.cwd(), getEndpointsFilePath());
-
-    try {
-      await saveEndpointsToFile(filePath, allEndpoints);
-    } catch (saveError: any) {
-      log.warning(
-        `[EndpointController] Failed to persist endpoint to file: ${saveError.message}`
-      );
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
+      return;
     }
 
+    // Validate and create endpoint object
+    const endpoint = createEndpointFromConfig(req.body);
+
+    // Extract access token from request
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader?.replace("Bearer ", "");
+
+    // Save to Supabase
+    const savedEndpoint = await createEndpoint(userId, endpoint, accessToken);
+
+    // Get or create user's MCP server and add endpoint
+    const userServer = await registry.getOrCreateServer(userId);
+    userServer.addEndpoint(savedEndpoint);
+
     log.info(
-      `[EndpointController] Successfully added endpoint '${endpoint.name}'`
+      `Successfully added endpoint '${endpoint.name}' for user ${userId}`
     );
+
     res.json({
       success: true,
       message: `Successfully added endpoint '${endpoint.name}'`,
       endpoint: {
-        name: endpoint.name,
-        url: endpoint.url,
-        method: endpoint.method,
+        id: savedEndpoint.id,
+        name: savedEndpoint.name,
+        url: savedEndpoint.url,
+        method: savedEndpoint.method,
       },
     });
-
-    setTimeout(() => {
-      log.info(
-        "[EndpointController] Restarting server to register new tool..."
-      );
-      process.exit(0); // Process manager (like pm2, nodemon) will restart
-    }, 2000);
   } catch (error: any) {
-    log.error(`[EndpointController] Error adding endpoint: ${error.message}`);
+    log.error(`Error adding endpoint: ${error.message}`, error);
     res.status(400).json({
       success: false,
       message: `Error adding endpoint: ${error.message}`,
@@ -79,13 +81,24 @@ export async function addEndpoint(
 export async function removeEndpoint(
   req: Request,
   res: Response,
-  dynamicServer: DynamicMCPServer
+  registry: MCPServerRegistry
 ): Promise<void> {
   try {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.id;
+
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
+      return;
+    }
+
     const endpointName = req.params.name;
 
     if (!endpointName) {
-      log.warning("[EndpointController] Remove endpoint called without name");
+      log.warning("Remove endpoint called without name");
       res.status(400).json({
         success: false,
         message: "Endpoint name is required",
@@ -93,36 +106,41 @@ export async function removeEndpoint(
       return;
     }
 
-    const removed = dynamicServer.removeEndpoint(endpointName);
+    // Extract access token
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader?.replace("Bearer ", "");
 
-    if (removed) {
-      const endpointManager = dynamicServer.getEndpointManager();
-      const allEndpoints = endpointManager.listEndpoints();
-      const filePath = path.resolve(process.cwd(), getEndpointsFilePath());
+    // Delete from Supabase
+    const deleted = await deleteEndpointByName(
+      userId,
+      endpointName,
+      accessToken
+    );
 
-      try {
-        await saveEndpointsToFile(filePath, allEndpoints);
-      } catch (saveError: any) {
-        log.warning(
-          `[EndpointController] Failed to persist endpoint removal to file: ${saveError.message}`
-        );
-      }
-
-      log.info(
-        `[EndpointController] Successfully removed endpoint '${endpointName}'`
-      );
-      res.json({
-        success: true,
-        message: `Successfully removed endpoint '${endpointName}'`,
-      });
-    } else {
+    if (!deleted) {
       res.status(404).json({
         success: false,
         message: `Endpoint '${endpointName}' not found`,
       });
+      return;
     }
+
+    // Remove from user's MCP server
+    const userServer = registry.getServerByUserId(userId);
+    if (userServer) {
+      userServer.removeEndpoint(endpointName);
+    }
+
+    log.info(
+      `Successfully removed endpoint '${endpointName}' for user ${userId}`
+    );
+
+    res.json({
+      success: true,
+      message: `Successfully removed endpoint '${endpointName}'`,
+    });
   } catch (error: any) {
-    log.error(`[EndpointController] Error removing endpoint: ${error.message}`);
+    log.error(`Error removing endpoint: ${error.message}`, error);
     res.status(500).json({
       success: false,
       message: `Error removing endpoint: ${error.message}`,
@@ -131,25 +149,102 @@ export async function removeEndpoint(
 }
 
 /**
- * List all configured endpoints
+ * List all configured endpoints for the authenticated user
  */
 export async function listEndpoints(
-  _req: Request,
-  res: Response,
-  endpointManager: EndpointManager
+  req: Request,
+  res: Response
 ): Promise<void> {
   try {
-    const endpoints = endpointManager.listEndpoints();
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.id;
+
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
+      return;
+    }
+
+    // Extract access token
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader?.replace("Bearer ", "");
+
+    // Fetch from Supabase
+    const endpoints = await getEndpointsByUserId(userId, accessToken);
+
     res.json({
       success: true,
       endpoints,
       count: endpoints.length,
     });
   } catch (error: any) {
-    log.error(`[EndpointController] Error listing endpoints: ${error.message}`);
+    log.error(`Error listing endpoints: ${error.message}`, error);
     res.status(500).json({
       success: false,
       message: `Error listing endpoints: ${error.message}`,
+    });
+  }
+}
+
+/**
+ * Update an existing endpoint
+ */
+export async function updateEndpointController(
+  req: Request,
+  res: Response,
+  registry: MCPServerRegistry
+): Promise<void> {
+  try {
+    const authReq = req as AuthenticatedRequest;
+    const userId = authReq.user?.id;
+
+    if (!userId) {
+      res.status(401).json({
+        success: false,
+        message: "User not authenticated",
+      });
+      return;
+    }
+
+    const endpointId = req.params.id;
+
+    if (!endpointId) {
+      res.status(400).json({
+        success: false,
+        message: "Endpoint ID is required",
+      });
+      return;
+    }
+
+    // Extract access token
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader?.replace("Bearer ", "");
+
+    // Update in Supabase
+    const updatedEndpoint = await updateEndpoint(
+      userId,
+      endpointId,
+      req.body,
+      accessToken
+    );
+
+    // Reload the user's server to reflect changes
+    await registry.reloadServerEndpoints(userId);
+
+    log.info(`Successfully updated endpoint ${endpointId} for user ${userId}`);
+
+    res.json({
+      success: true,
+      message: "Endpoint updated successfully",
+      endpoint: updatedEndpoint,
+    });
+  } catch (error: any) {
+    log.error(`Error updating endpoint: ${error.message}`, error);
+    res.status(500).json({
+      success: false,
+      message: `Error updating endpoint: ${error.message}`,
     });
   }
 }

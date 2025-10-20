@@ -211,9 +211,22 @@ export async function getProfile(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    // Get base URL for MCP connection
+    const baseUrl =
+      process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
+
+    const userId = authReq.user.id;
+    const userEmail = authReq.user.email;
+
     res.json({
       success: true,
       user: toAuthUser(authReq.user),
+      mcp_connection: {
+        url_by_id: `${baseUrl}/mcp/${userId}`,
+        url_by_username: userEmail
+          ? `${baseUrl}/mcp/u/${userEmail.split("@")[0]}`
+          : undefined,
+      },
     });
   } catch (error: any) {
     log.error(`[AuthController] Get profile error: ${error.message}`);
