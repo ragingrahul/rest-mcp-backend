@@ -9,9 +9,10 @@ A dynamic Model Context Protocol (MCP) server that allows you to add and remove 
 - 🔌 **MCP Protocol**: Full MCP server implementation via Streamable HTTP
 - 📡 **Real-time Updates**: Clients are automatically notified when tools change
 - 🛠️ **Type Safe**: Built with TypeScript for type safety
-- 💰 **Crypto Payments**: Built-in payment system with Base blockchain support
+- 💰 **Real-Time Blockchain Payments**: Instant ETH payments on Base with transaction confirmation
 - 👥 **Multi-User Architecture**: Developers create tools, end users pay for usage
 - 🔐 **User Authentication**: Secure JWT-based authentication with Supabase
+- ⛓️ **On-Chain Verification**: All payments recorded on Base blockchain with tx hashes
 
 ## Quick Start
 

@@ -11,9 +11,9 @@ import {
 } from "../services/balanceRepository.js";
 import {
   getPaymentByPaymentId,
-  markPaymentCompleted,
   markPaymentFailed,
 } from "../services/paymentRepository.js";
+import { PaymentStatus } from "../types/payment.types.js";
 import { LoggerFactory } from "../infrastructure/logging/LoggerFactory.js";
 
 const log = LoggerFactory.getLogger("PaymentTools");
@@ -79,7 +79,7 @@ export const PAYMENT_TOOLS: Record<string, MCPTool> = {
 
 /**
  * Execute the approve_payment tool
- * Uses internal accounting - deducts from user balance instantly
+ * Deducts from user balance and sends actual blockchain transaction
  */
 export async function executeApprovePayment(
   userId: string,
@@ -134,26 +134,93 @@ export async function executeApprovePayment(
 
     // Deduct from user's balance (internal accounting)
     await deductPayment(userId, payment.amount_eth);
+    log.info(`✓ Deducted ${payment.amount_eth} ETH from user balance`);
 
-    // Mark payment as completed (instant for internal accounting)
-    await markPaymentCompleted(payment_id);
-
-    log.info(
-      `Payment approved and completed: ${payment_id} (${payment.amount_eth} ETH)`
+    // Send blockchain transaction
+    log.info(`🔗 Initiating blockchain transaction...`);
+    const { updatePaymentTransaction } = await import(
+      "../services/paymentRepository.js"
     );
 
-    const newBalance = (currentBalance - paymentAmount).toFixed(6);
+    try {
+      // Mark as processing
+      await updatePaymentTransaction(payment_id, {
+        status: PaymentStatus.PROCESSING,
+      });
 
-    return {
-      success: true,
-      payment_id: payment_id,
-      amount: payment.amount_eth,
-      status: "completed",
-      message: `✅ Payment approved! Balance: ${newBalance} ETH\n\n🔑 CRITICAL: You MUST include "_payment_id" parameter in your next tool call:\n\n_payment_id: "${payment_id}"\n\nWithout this parameter, you'll be charged again!`,
-      remaining_balance: newBalance,
-      next_action: `Call the original tool again with _payment_id: "${payment_id}" as an additional parameter`,
-      example: `If you called get_weather(latitude: 51.5, longitude: -0.1), now call: get_weather(latitude: 51.5, longitude: -0.1, _payment_id: "${payment_id}")`,
-    };
+      // Import blockchain service
+      const { BaseWalletService } = await import(
+        "../infrastructure/blockchain/BaseWalletService.js"
+      );
+      const { parseEther } = await import("viem");
+
+      const walletService = new BaseWalletService();
+
+      // Get platform wallet private key from env
+      const platformPrivateKey = process.env.PLATFORM_WALLET_PRIVATE_KEY;
+      if (!platformPrivateKey) {
+        throw new Error("PLATFORM_WALLET_PRIVATE_KEY not configured");
+      }
+
+      // Send ETH transaction from platform wallet to developer wallet
+      log.info(`Sending ${payment.amount_eth} ETH to ${payment.to_wallet}...`);
+      const txHash = await walletService.transfer({
+        privateKey: platformPrivateKey,
+        to: payment.to_wallet as `0x${string}`,
+        value: parseEther(payment.amount_eth),
+      });
+
+      log.info(`✓ Transaction submitted: ${txHash}`);
+      log.info(`⏳ Waiting for confirmation...`);
+
+      // Wait for transaction confirmation
+      await walletService.waitForTransaction(txHash);
+
+      log.info(`✅ Transaction confirmed: ${txHash}`);
+
+      // Mark payment as completed with blockchain tx hash
+      await updatePaymentTransaction(payment_id, {
+        status: PaymentStatus.COMPLETED,
+        blockchain_tx_hash: txHash,
+      });
+
+      const newBalance = (currentBalance - paymentAmount).toFixed(6);
+
+      return {
+        success: true,
+        payment_id: payment_id,
+        amount: payment.amount_eth,
+        status: "completed",
+        blockchain_tx_hash: txHash,
+        message: `✅ Payment successful! Blockchain transaction confirmed.\n\nTransaction: ${txHash}\nBalance: ${newBalance} ETH\n\n🔑 CRITICAL: Include "_payment_id" in your next tool call:\n\n_payment_id: "${payment_id}"`,
+        remaining_balance: newBalance,
+        next_action: `Call the original tool again with _payment_id: "${payment_id}" as an additional parameter`,
+        example: `get_weather(latitude: 51.5, longitude: -0.1, _payment_id: "${payment_id}")`,
+      };
+    } catch (blockchainError: any) {
+      // Blockchain transaction failed - refund user's balance
+      log.error(`Blockchain transaction failed: ${blockchainError.message}`);
+
+      // Refund the deducted amount
+      const { addDeposit } = await import("../services/balanceRepository.js");
+      await addDeposit(userId, payment.amount_eth);
+      log.info(`✓ Refunded ${payment.amount_eth} ETH to user balance`);
+
+      // Mark payment as failed
+      await markPaymentFailed(
+        payment_id,
+        `Blockchain transaction failed: ${blockchainError.message}`
+      );
+
+      return {
+        success: false,
+        message: `Payment failed: ${blockchainError.message}`,
+        error: blockchainError.message,
+        refunded: true,
+        refund_amount: payment.amount_eth,
+        note: "Your balance has been refunded. Please try again or contact support.",
+      };
+    }
   } catch (error: any) {
     log.error(`Error executing approve_payment: ${error.message}`, error);
 
