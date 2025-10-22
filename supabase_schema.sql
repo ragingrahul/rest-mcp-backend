@@ -4,6 +4,107 @@
 -- This schema creates the endpoints table with proper
 -- Row Level Security (RLS) for multi-tenant isolation
 -- =====================================================
+-- =====================================================
+-- User Profiles Table
+-- =====================================================
+-- Central profile data linking auth.users to all other tables
+
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    full_name TEXT,
+    
+    -- Wallet addresses
+    wallet_address TEXT, -- User's personal Base wallet for receiving payments
+    
+    -- Role and permissions
+    role TEXT NOT NULL DEFAULT 'developer' CHECK (role IN ('developer', 'consumer', 'admin')),
+    
+    -- Statistics (could be computed, but stored for performance)
+    total_endpoints_created INTEGER DEFAULT 0,
+    total_api_calls_made INTEGER DEFAULT 0,
+    total_earnings_eth TEXT DEFAULT '0',
+    
+    -- Settings
+    email_notifications BOOLEAN DEFAULT true,
+    public_profile BOOLEAN DEFAULT true,
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_seen_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Create indexes
+CREATE INDEX IF NOT EXISTS idx_profiles_email ON public.profiles(email);
+CREATE INDEX IF NOT EXISTS idx_profiles_display_name ON public.profiles(display_name);
+CREATE INDEX IF NOT EXISTS idx_profiles_wallet_address ON public.profiles(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_profiles_role ON public.profiles(role);
+
+-- Enable RLS
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+DROP POLICY IF EXISTS "Public profiles are viewable by everyone" ON public.profiles;
+DROP POLICY IF EXISTS "Users can view their own profile" ON public.profiles;
+DROP POLICY IF EXISTS "Users can update their own profile" ON public.profiles;
+
+CREATE POLICY "Public profiles are viewable by everyone"
+    ON public.profiles
+    FOR SELECT
+    USING (public_profile = true);
+
+CREATE POLICY "Users can view their own profile"
+    ON public.profiles
+    FOR SELECT
+    USING (auth.uid() = id);
+
+CREATE POLICY "Users can update their own profile"
+    ON public.profiles
+    FOR UPDATE
+    USING (auth.uid() = id)
+    WITH CHECK (auth.uid() = id);
+
+CREATE POLICY "Users can insert their own profile"
+    ON public.profiles
+    FOR INSERT
+    WITH CHECK (auth.uid() = id);
+
+-- Trigger for updated_at
+DROP TRIGGER IF EXISTS update_profiles_updated_at ON public.profiles;
+CREATE TRIGGER update_profiles_updated_at
+    BEFORE UPDATE ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION public.update_updated_at_column();
+
+-- Function to create profile on user signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO public.profiles (id, email, full_name)
+    VALUES (
+        NEW.id,
+        NEW.email,
+        NEW.raw_user_meta_data->>'full_name'
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger to auto-create profile on signup
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW
+    EXECUTE FUNCTION public.handle_new_user();
+
+-- Grant access
+GRANT SELECT, UPDATE ON public.profiles TO authenticated;
+GRANT INSERT ON public.profiles TO authenticated;
+
+-- Comments
+COMMENT ON TABLE public.profiles IS 'User profile data that ties together all user-related information';
+COMMENT ON COLUMN public.profiles.wallet_address IS 'User wallet address for receiving payments (stored in endpoint_pricing per endpoint)';
 
 -- Create endpoints table
 CREATE TABLE IF NOT EXISTS public.endpoints (

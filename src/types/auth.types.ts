@@ -23,6 +23,7 @@ export interface AuthConfig {
 export interface AuthUser {
   id: string;
   email: string;
+  full_name?: string;
   user_metadata?: Record<string, any>;
   app_metadata?: Record<string, any>;
 }

@@ -22,13 +22,40 @@ const log = {
 /**
  * Convert Supabase User to AuthUser
  */
-function toAuthUser(user: any): AuthUser {
+function toAuthUser(user: any, fullName?: string): AuthUser {
   return {
     id: user.id,
     email: user.email,
+    full_name: fullName,
     user_metadata: user.user_metadata,
     app_metadata: user.app_metadata,
   };
+}
+
+/**
+ * Fetch full name from profiles table
+ */
+async function getFullNameFromProfile(
+  userId: string
+): Promise<string | undefined> {
+  try {
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("full_name")
+      .eq("id", userId)
+      .single();
+
+    if (error || !data) {
+      return undefined;
+    }
+
+    return data.full_name;
+  } catch (error) {
+    log.warning(
+      `[AuthController] Failed to fetch full name for user ${userId}`
+    );
+    return undefined;
+  }
 }
 
 /**
@@ -94,11 +121,14 @@ export async function signup(req: Request, res: Response): Promise<void> {
 
     log.info(`[AuthController] User registered: ${email}`);
 
+    // Fetch full name from profile
+    const fullName = await getFullNameFromProfile(data.user.id);
+
     res.status(201).json({
       success: true,
       message:
         "User registered successfully. Please check your email for verification.",
-      user: toAuthUser(data.user),
+      user: toAuthUser(data.user, fullName),
       access_token: data.session?.access_token,
       refresh_token: data.session?.refresh_token,
     });
@@ -154,10 +184,13 @@ export async function login(req: Request, res: Response): Promise<void> {
 
     log.info(`[AuthController] User logged in: ${email}`);
 
+    // Fetch full name from profile
+    const fullName = await getFullNameFromProfile(data.user.id);
+
     res.json({
       success: true,
       message: "Login successful",
-      user: toAuthUser(data.user),
+      user: toAuthUser(data.user, fullName),
       access_token: data.session.access_token,
       refresh_token: data.session.refresh_token,
     });
@@ -218,9 +251,12 @@ export async function getProfile(req: Request, res: Response): Promise<void> {
     const userId = authReq.user.id;
     const userEmail = authReq.user.email;
 
+    // Fetch full name from profile
+    const fullName = await getFullNameFromProfile(userId);
+
     res.json({
       success: true,
-      user: toAuthUser(authReq.user),
+      user: toAuthUser(authReq.user, fullName),
       mcp_connection: {
         url_by_id: `${baseUrl}/mcp/${userId}`,
         url_by_username: userEmail
@@ -268,12 +304,17 @@ export async function refreshToken(req: Request, res: Response): Promise<void> {
 
     log.info(`[AuthController] Token refreshed for user: ${data.user?.email}`);
 
+    // Fetch full name from profile if user exists
+    const fullName = data.user
+      ? await getFullNameFromProfile(data.user.id)
+      : undefined;
+
     res.json({
       success: true,
       message: "Token refreshed successfully",
       access_token: data.session.access_token,
       refresh_token: data.session.refresh_token,
-      user: data.user ? toAuthUser(data.user) : undefined,
+      user: data.user ? toAuthUser(data.user, fullName) : undefined,
     });
   } catch (error: any) {
     log.error(`[AuthController] Token refresh error: ${error.message}`);
