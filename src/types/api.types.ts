@@ -40,6 +40,9 @@ export interface APIEndpoint {
   headers?: Record<string, string>;
   timeout?: number;
   auth?: AuthConfig; // imported from auth.types.ts
+  price_per_call_eth?: string; // Payment: ETH cost per call
+  developer_wallet_address?: string; // Payment: where to send funds
+  requires_payment?: boolean; // Payment: computed field
   created_at?: string; // ISO timestamp
   updated_at?: string; // ISO timestamp
 }
@@ -73,6 +76,8 @@ export interface CreateEndpointInput {
   headers?: Record<string, string>;
   timeout?: number;
   auth?: AuthConfig;
+  price_per_call_eth?: string; // Payment: ETH cost per call
+  developer_wallet_address?: string; // Payment: developer's wallet
 }
 
 /**
@@ -87,4 +92,6 @@ export interface UpdateEndpointInput {
   headers?: Record<string, string>;
   timeout?: number;
   auth?: AuthConfig;
+  price_per_call_eth?: string; // Payment: ETH cost per call
+  developer_wallet_address?: string; // Payment: developer's wallet
 }

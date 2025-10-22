@@ -6,7 +6,6 @@
 import { supabase, getSupabaseWithAuth } from "./supabase.js";
 import {
   APIEndpoint,
-  EndpointRecord,
   CreateEndpointInput,
   UpdateEndpointInput,
 } from "../types/api.types.js";
@@ -18,8 +17,8 @@ const log = LoggerFactory.getLogger("EndpointRepository");
 /**
  * Convert database record to APIEndpoint
  */
-function toAPIEndpoint(record: EndpointRecord): APIEndpoint {
-  return {
+function toAPIEndpoint(record: any): APIEndpoint {
+  const endpoint: APIEndpoint = {
     id: record.id,
     user_id: record.user_id,
     name: record.name,
@@ -32,6 +31,17 @@ function toAPIEndpoint(record: EndpointRecord): APIEndpoint {
     created_at: record.created_at,
     updated_at: record.updated_at,
   };
+
+  // Add pricing fields if available
+  if (record.endpoint_pricing) {
+    endpoint.price_per_call_eth = record.endpoint_pricing.price_per_call_eth;
+    endpoint.developer_wallet_address =
+      record.endpoint_pricing.developer_wallet_address;
+    endpoint.requires_payment =
+      parseFloat(record.endpoint_pricing.price_per_call_eth) > 0;
+  }
+
+  return endpoint;
 }
 
 /**
@@ -167,6 +177,7 @@ export async function deleteEndpointByName(
 
 /**
  * Get all endpoints for a user (client-side with auth token)
+ * Includes pricing information via LEFT JOIN
  */
 export async function getEndpointsByUserId(
   userId: string,
@@ -176,7 +187,15 @@ export async function getEndpointsByUserId(
 
   const { data, error } = await client
     .from("endpoints")
-    .select("*")
+    .select(
+      `
+      *,
+      endpoint_pricing (
+        price_per_call_eth,
+        developer_wallet_address
+      )
+    `
+    )
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
 
@@ -192,6 +211,7 @@ export async function getEndpointsByUserId(
  * Get all endpoints for a user (public read via RLS)
  * Uses anon key with public SELECT policy - no auth needed for reading
  * This is used for server initialization to load endpoints for MCP servers
+ * Includes pricing information via LEFT JOIN
  */
 export async function getEndpointsByUserIdServerSide(
   userId: string
@@ -199,7 +219,15 @@ export async function getEndpointsByUserIdServerSide(
   // Use anon client - RLS allows public SELECT on endpoints (marketplace model)
   const { data, error } = await supabase
     .from("endpoints")
-    .select("*")
+    .select(
+      `
+      *,
+      endpoint_pricing (
+        price_per_call_eth,
+        developer_wallet_address
+      )
+    `
+    )
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
 
@@ -216,6 +244,7 @@ export async function getEndpointsByUserIdServerSide(
 
 /**
  * Get a specific endpoint by name for a user
+ * Includes pricing information via LEFT JOIN
  */
 export async function getEndpointByName(
   userId: string,
@@ -226,7 +255,15 @@ export async function getEndpointByName(
 
   const { data, error } = await client
     .from("endpoints")
-    .select("*")
+    .select(
+      `
+      *,
+      endpoint_pricing (
+        price_per_call_eth,
+        developer_wallet_address
+      )
+    `
+    )
     .eq("user_id", userId)
     .eq("name", name)
     .single();
@@ -245,6 +282,7 @@ export async function getEndpointByName(
 
 /**
  * Get a specific endpoint by ID
+ * Includes pricing information via LEFT JOIN
  */
 export async function getEndpointById(
   userId: string,
@@ -255,7 +293,15 @@ export async function getEndpointById(
 
   const { data, error } = await client
     .from("endpoints")
-    .select("*")
+    .select(
+      `
+      *,
+      endpoint_pricing (
+        price_per_call_eth,
+        developer_wallet_address
+      )
+    `
+    )
     .eq("id", endpointId)
     .eq("user_id", userId)
     .single();

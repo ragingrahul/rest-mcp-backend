@@ -27,7 +27,11 @@ export class MCPServerRegistry implements IMCPServerRegistry {
   }
 
   /**
-   * Get or create a server instance for a specific user
+   * Get or create a server instance for a specific user (LEGACY)
+   *
+   * NOTE: This is used by legacy single-ID routes where developer uses their own tools.
+   * For dual-ID architecture (developer creates, end user pays), use createFreshTransport
+   * in mcpRoutes.ts directly instead of this registry.
    */
   async getOrCreateServer(userId: string): Promise<DynamicMCPServer> {
     // Check if server already exists
@@ -35,9 +39,14 @@ export class MCPServerRegistry implements IMCPServerRegistry {
       return this.servers.get(userId)!;
     }
 
-    // Create new server instance for this user
-    log.info(`Creating new MCP server for user ${userId}`);
-    const server = new DynamicMCPServer();
+    // Create new server instance for this user (self-use: same ID for both)
+    log.info(`Creating new MCP server for user ${userId} (self-use)`);
+    const server = new DynamicMCPServer(
+      `mcp-server-${userId}`,
+      undefined,
+      userId, // Developer ID (who owns endpoints)
+      userId // End user ID (same person using their own tools)
+    );
 
     // Load user's endpoints from Supabase (using service role key)
     try {

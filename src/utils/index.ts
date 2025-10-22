@@ -4,3 +4,4 @@
  */
 
 export * from "./endpointUtils.js";
+export * from "./encryption.js";

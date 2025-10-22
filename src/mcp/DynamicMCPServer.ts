@@ -16,6 +16,8 @@ export class DynamicMCPServer {
   private endpointManager: EndpointManager;
   private registeredTools: Map<string, RegisteredTool>;
   private isConnected: boolean = false;
+  private developerId?: string; // Developer who owns the endpoints
+  private endUserId?: string; // End user who is using/paying for the tools
 
   /**
    * Pure MCP Server that serves tools from an EndpointManager
@@ -25,20 +27,36 @@ export class DynamicMCPServer {
    *
    * @param serverName - Name for the MCP server instance
    * @param endpointManager - EndpointManager instance to get tools from
+   * @param developerId - Developer who created the endpoints (receives payment)
+   * @param endUserId - End user who is using the tools (pays for them)
    */
   constructor(
     serverName: string = "dynamic-mcp-server",
-    endpointManager?: EndpointManager
+    endpointManager?: EndpointManager,
+    developerId?: string,
+    endUserId?: string
   ) {
     this.endpointManager = endpointManager || new EndpointManager();
     this.registeredTools = new Map();
+    this.developerId = developerId;
+    this.endUserId = endUserId;
     this.server = new McpServer({
       name: serverName,
       version: "1.0.0",
     });
 
-    this.setupServer();
-    console.log(`[DynamicMCP] Initialized MCP server '${serverName}'`);
+    // Setup server asynchronously
+    this.setupServer()
+      .then(() => {
+        console.log(
+          `[DynamicMCP] Initialized MCP server '${serverName}'` +
+            `${developerId ? ` developer=${developerId}` : ""}` +
+            `${endUserId ? ` endUser=${endUserId}` : ""}`
+        );
+      })
+      .catch((error) => {
+        console.error(`[DynamicMCP] Error setting up server: ${error.message}`);
+      });
   }
 
   /**
@@ -56,10 +74,90 @@ export class DynamicMCPServer {
    * This method converts the JSON Schema from EndpointManager tools
    * into Zod schemas and registers them with the MCP server.
    */
-  private setupServer(): void {
+  private async setupServer(): Promise<void> {
+    // Register payment tools if endUserId is available
+    // Payment tools are for the END USER (who pays)
+    if (this.endUserId) {
+      await this.registerPaymentTools();
+    }
+
     // Register any tools that already exist in the endpoint manager
     for (const [toolName, tool] of this.endpointManager.getTools()) {
       this.registerTool(toolName, tool);
+    }
+  }
+
+  /**
+   * Register payment-related MCP tools
+   */
+  private async registerPaymentTools(): Promise<void> {
+    const { PAYMENT_TOOLS } = await import("./PaymentTools.js");
+
+    for (const [toolName, tool] of Object.entries(PAYMENT_TOOLS)) {
+      this.registerPaymentTool(toolName, tool as MCPTool);
+    }
+  }
+
+  /**
+   * Register a payment tool with the MCP server
+   * Payment tools operate on the END USER's balance
+   */
+  private registerPaymentTool(toolName: string, tool: MCPTool): void {
+    try {
+      const zodSchema = this.jsonSchemaToZod(tool.inputSchema);
+
+      const registeredTool = this.server.tool(
+        toolName,
+        tool.description || "",
+        zodSchema,
+        async (args) => {
+          console.log(
+            `[DynamicMCP] Payment tool call: ${toolName} by endUser=${this.endUserId}`
+          );
+
+          try {
+            // Execute payment tool using END USER's ID (who pays)
+            const { executePaymentTool } = await import("./PaymentTools.js");
+            const result = await executePaymentTool(
+              toolName,
+              this.endUserId!, // End user pays
+              args || {}
+            );
+
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(result, null, 2),
+                },
+              ],
+            };
+          } catch (error: any) {
+            console.error(
+              `[DynamicMCP] Error executing payment tool '${toolName}':`,
+              error
+            );
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `Error: ${error.message}`,
+                },
+              ],
+            };
+          }
+        }
+      );
+
+      this.registeredTools.set(toolName, registeredTool);
+      console.log(
+        `[DynamicMCP] Registered payment tool '${toolName}' for endUser`
+      );
+    } catch (error: any) {
+      console.error(
+        `[DynamicMCP] Error registering payment tool ${toolName}:`,
+        error
+      );
     }
   }
 
@@ -85,10 +183,14 @@ export class DynamicMCPServer {
           );
 
           try {
-            // Call the API endpoint
+            // Call the API endpoint with BOTH IDs
+            // endUserId = who pays for the tool
+            // developerId = who receives the payment
             const result = await this.endpointManager.callApiEndpoint(
               toolName,
-              args || {}
+              args || {},
+              this.endUserId, // End user pays
+              this.developerId // Developer receives
             );
             console.log(
               `[DynamicMCP] Tool '${toolName}' execution result:`,
@@ -107,7 +209,12 @@ export class DynamicMCPServer {
                     result.message || "Success - no data returned";
                 }
               } else {
-                formattedMessage = result.message || "Unknown error occurred";
+                // Handle 402 Payment Required responses
+                if (result.status_code === 402 && result.payment_details) {
+                  formattedMessage = `${result.message}\n\nPayment Details:\n${JSON.stringify(result.payment_details, null, 2)}`;
+                } else {
+                  formattedMessage = result.message || "Unknown error occurred";
+                }
               }
             } else {
               formattedMessage = String(result);

@@ -25,9 +25,13 @@ const userTransports = new Map<string, StreamableHTTPServerTransport>();
 /**
  * Create a fresh MCP server and transport for a user
  * This creates a NEW server instance each time to avoid connection state issues
+ *
+ * @param developerId - ID of developer who owns the endpoints
+ * @param endUserId - ID of end user who is using/paying for the tools
  */
 export async function createFreshTransport(
-  userId: string,
+  developerId: string,
+  endUserId: string,
   _registry: MCPServerRegistry
 ): Promise<StreamableHTTPServerTransport> {
   // ALWAYS create a fresh DynamicMCPServer for this connection
@@ -37,11 +41,16 @@ export async function createFreshTransport(
     "../services/endpointRepository.js"
   );
 
-  // Create a brand new MCP server instance
-  const mcpServer = new DynamicMCPServer();
+  // Create a brand new MCP server instance with BOTH IDs
+  const mcpServer = new DynamicMCPServer(
+    `mcp-server-${developerId}-${endUserId}`,
+    undefined,
+    developerId, // Developer who created the tools
+    endUserId // End user who is using/paying
+  );
 
-  // Load user's endpoints
-  const endpoints = await getEndpointsByUserIdServerSide(userId);
+  // Load DEVELOPER's endpoints
+  const endpoints = await getEndpointsByUserIdServerSide(developerId);
 
   // Add all endpoints to this fresh server
   for (const endpoint of endpoints) {
@@ -69,7 +78,7 @@ export async function createFreshTransport(
   mcpServer.markAsConnected();
 
   log.info(
-    `[MCPRoutes] Created fresh MCP server and transport for user ${userId}`
+    `[MCPRoutes] Created fresh MCP server: developer=${developerId} endUser=${endUserId}`
   );
 
   return transport;
@@ -77,30 +86,36 @@ export async function createFreshTransport(
 
 /**
  * Legacy function for backwards compatibility
+ * When only one userId provided, use it as both developer and end user (self-use)
  */
 export async function getOrCreateTransport(
   userId: string,
   registry: MCPServerRegistry
 ): Promise<StreamableHTTPServerTransport> {
-  return createFreshTransport(userId, registry);
+  return createFreshTransport(userId, userId, registry);
 }
 
 /**
- * Handle MCP Streamable HTTP connection for a specific user
+ * Handle MCP Streamable HTTP connection with dual-ID support
  */
 async function handleMCPConnection(
   req: Request,
   res: Response,
   registry: MCPServerRegistry,
-  userId: string
+  developerId: string,
+  endUserId: string
 ): Promise<void> {
   try {
     log.info(
-      `[MCPRoutes] MCP Streamable HTTP connection requested for user ${userId}`
+      `[MCPRoutes] MCP connection: developer=${developerId} endUser=${endUserId}`
     );
 
-    // Get or create transport for this user
-    const transport = await getOrCreateTransport(userId, registry);
+    // Create fresh transport for this connection
+    const transport = await createFreshTransport(
+      developerId,
+      endUserId,
+      registry
+    );
 
     // Handle the request using StreamableHTTPServerTransport
     await transport.handleRequest(req as any, res as any);
@@ -151,11 +166,21 @@ export function createMCPRoutes(registry: MCPServerRegistry): Router {
   // Health check
   router.get("/api/mcp/health", mcpHealthCheck);
 
-  // MCP Streamable HTTP endpoint by user ID (public - no auth required)
-  // Handles both GET (SSE) and POST (messages) as per MCP Streamable HTTP spec
+  // DUAL-ID STRUCTURE: /mcp/{developerId}/user/{endUserId}
+  // Developer creates tools, end user pays for using them
+  router.all("/mcp/:developerId/user/:endUserId", async (req, res) => {
+    const developerId = req.params.developerId;
+    const endUserId = req.params.endUserId;
+
+    await handleMCPConnection(req, res, registry, developerId, endUserId);
+  });
+
+  // LEGACY: Single user ID (developer using their own tools)
+  // Kept for backwards compatibility
   router.all("/mcp/:userId", async (req, res) => {
     const userId = req.params.userId;
-    await handleMCPConnection(req, res, registry, userId);
+    // Use same ID for both developer and end user (self-use)
+    await handleMCPConnection(req, res, registry, userId, userId);
   });
 
   // MCP Streamable HTTP endpoint by username (public - no auth required)
@@ -173,7 +198,8 @@ export function createMCPRoutes(registry: MCPServerRegistry): Router {
       return;
     }
 
-    await handleMCPConnection(req, res, registry, userId);
+    // Self-use: same ID for both
+    await handleMCPConnection(req, res, registry, userId, userId);
   });
 
   // Reload endpoint transport for a user (admin/development use)

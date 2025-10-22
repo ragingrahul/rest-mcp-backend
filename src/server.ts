@@ -18,6 +18,7 @@ import {
   closeAllTransports,
   getOrCreateTransport,
 } from "./routes/mcpRoutes.js";
+import { paymentRoutes } from "./routes/index.js";
 import { getAllUsersWithEndpoints } from "./services/endpointRepository.js";
 
 // Configure logging
@@ -98,6 +99,9 @@ async function main(): Promise<void> {
 
   // Endpoint management routes (protected with authentication)
   app.use("/api/endpoints", createEndpointRoutes(registry));
+
+  // Payment routes (protected with authentication)
+  app.use("/api", paymentRoutes);
 
   // MCP routes (includes both public MCP endpoints and protected connection info)
   app.use(createMCPRoutes(registry));
@@ -188,6 +192,19 @@ async function main(): Promise<void> {
     log.info(`    GET    http://${host}:${port}/api/endpoints`);
     log.info(`    PUT    http://${host}:${port}/api/endpoints/:id`);
     log.info(`    DELETE http://${host}:${port}/api/endpoints/:name`);
+    log.info("");
+    log.info("  Payment & Balance (auth required):");
+    log.info(`    GET    http://${host}:${port}/api/balance`);
+    log.info(`    GET    http://${host}:${port}/api/deposit`);
+    log.info(`    POST   http://${host}:${port}/api/deposit/credit`);
+    log.info(`    POST   http://${host}:${port}/api/deposit/manual`);
+    log.info(
+      `    POST   http://${host}:${port}/api/pricing/endpoint/:endpointId`
+    );
+    log.info(
+      `    GET    http://${host}:${port}/api/pricing/endpoint/:endpointId`
+    );
+    log.info(`    GET    http://${host}:${port}/api/payments/history`);
     log.info("");
     log.info("  MCP Connections:");
     log.info(

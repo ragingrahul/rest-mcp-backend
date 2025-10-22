@@ -16,6 +16,7 @@ interface ApiResponse {
   status_code?: number;
   data?: any;
   message: string;
+  payment_details?: any; // For 402 Payment Required responses
 }
 
 export class EndpointManager {
@@ -93,6 +94,14 @@ export class EndpointManager {
       }
     }
 
+    // Add _payment_id as an optional parameter for paid tools
+    // This allows Claude to include it after payment approval
+    properties["_payment_id"] = {
+      type: "string",
+      description:
+        "Payment ID from approve_payment tool. Include this after approving payment to use your paid transaction. Without this, you'll be charged again!",
+    };
+
     return {
       name: endpoint.name,
       description: endpoint.description,
@@ -105,16 +114,188 @@ export class EndpointManager {
   }
 
   /**
+   * Check if payment is required and verify payment status
+   * Returns ApiResponse with 402 if payment required but not satisfied
+   * Returns null if payment is not required or already satisfied
+   *
+   * @param endpointId - ID of the endpoint being called
+   * @param endUserId - ID of end user who pays for the tool
+   * @param developerId - ID of developer who receives the payment
+   * @param args - Tool arguments
+   */
+  private async checkPaymentRequired(
+    endpointId: string,
+    endUserId: string,
+    developerId: string,
+    args: Record<string, any>
+  ): Promise<ApiResponse | null> {
+    try {
+      // Dynamic imports to avoid circular dependencies
+      const { getPricingByEndpointId } = await import(
+        "../services/pricingRepository.js"
+      );
+      const { getBalanceByUserId } = await import(
+        "../services/balanceRepository.js"
+      );
+      const { getPaymentByPaymentId, createPaymentTransaction } = await import(
+        "../services/paymentRepository.js"
+      );
+      const { PLATFORM_WALLET_ADDRESS } = await import(
+        "../controllers/paymentController.js"
+      );
+
+      // Check if endpoint has pricing
+      const pricing = await getPricingByEndpointId(endpointId);
+
+      if (!pricing || parseFloat(pricing.price_per_call_eth) <= 0) {
+        // No payment required
+        return null;
+      }
+
+      // Check if payment_id is provided in args
+      const paymentId = args._payment_id;
+
+      if (paymentId) {
+        this.logger.info(`Payment ID provided: ${paymentId}, verifying...`);
+        // Verify the payment
+        const payment = await getPaymentByPaymentId(paymentId);
+
+        if (!payment) {
+          return {
+            success: false,
+            status_code: 402,
+            message: "Invalid payment_id provided",
+          };
+        }
+
+        if (payment.user_id !== endUserId) {
+          return {
+            success: false,
+            status_code: 402,
+            message: "Unauthorized: payment_id belongs to another user",
+          };
+        }
+
+        if (payment.endpoint_id !== endpointId) {
+          return {
+            success: false,
+            status_code: 402,
+            message: "payment_id is for a different endpoint",
+          };
+        }
+
+        // Check if payment is completed
+        if (payment.status === "completed") {
+          // Payment verified and completed - allow tool execution
+          this.logger.info(
+            `✓ Payment ${paymentId} verified as completed, proceeding with tool execution`
+          );
+          // Remove _payment_id from args so it doesn't get passed to API
+          delete args._payment_id;
+          return null; // Payment satisfied - tool will execute
+        }
+
+        // Payment exists but not completed yet
+        this.logger.warning(
+          `Payment ${paymentId} status: ${payment.status} (not completed)`
+        );
+        return {
+          success: false,
+          status_code: 402,
+          message: `Payment ${paymentId} status is ${payment.status}, not completed`,
+          payment_details: {
+            payment_id: paymentId,
+            status: payment.status,
+            message:
+              payment.status === "pending"
+                ? "Call approve_payment tool to complete this payment"
+                : `Payment status: ${payment.status}. Cannot proceed.`,
+          },
+        };
+      }
+
+      // No payment_id provided - need to create pending payment
+      // Check END USER's balance (who will pay)
+      const endUserBalance = await getBalanceByUserId(endUserId);
+
+      if (!endUserBalance) {
+        return {
+          success: false,
+          status_code: 402,
+          message: "Payment Required - No balance found for end user",
+          payment_details: {
+            amount_eth: pricing.price_per_call_eth,
+            developer_wallet: pricing.developer_wallet_address,
+            developer_id: developerId,
+            next_step:
+              "Call get_deposit_address tool to get deposit instructions and fund your account",
+          },
+        };
+      }
+
+      // Check END USER's balance (not developer's!)
+      const currentBalance = parseFloat(endUserBalance.balance_eth);
+      const requiredAmount = parseFloat(pricing.price_per_call_eth);
+
+      // Create pending payment FROM end user TO developer
+      const payment = await createPaymentTransaction(
+        endUserId, // END USER pays
+        endpointId,
+        PLATFORM_WALLET_ADDRESS,
+        pricing.developer_wallet_address, // DEVELOPER receives
+        pricing.price_per_call_eth
+      );
+
+      return {
+        success: false,
+        status_code: 402,
+        message:
+          "💰 Payment Required - This tool costs " +
+          pricing.price_per_call_eth +
+          " ETH per call",
+        payment_details: {
+          payment_id: payment.payment_id,
+          amount_eth: pricing.price_per_call_eth,
+          developer_wallet: pricing.developer_wallet_address,
+          your_balance: currentBalance.toString(),
+          sufficient_balance: currentBalance >= requiredAmount,
+          step_1:
+            currentBalance >= requiredAmount
+              ? `Call: approve_payment(payment_id: "${payment.payment_id}")`
+              : `Insufficient balance. Need ${(requiredAmount - currentBalance).toFixed(6)} ETH more. Call get_deposit_address to fund account.`,
+          step_2:
+            currentBalance >= requiredAmount
+              ? `After approval, retry this SAME tool call but ADD this parameter: _payment_id: "${payment.payment_id}"`
+              : "After funding, call approve_payment, then retry with _payment_id",
+          warning:
+            "⚠️ If you retry without _payment_id, you'll be charged AGAIN!",
+        },
+      };
+    } catch (error: any) {
+      this.logger.error(`Payment check error: ${error.message}`, error);
+      return {
+        success: false,
+        status_code: 500,
+        message: `Payment verification error: ${error.message}`,
+      };
+    }
+  }
+
+  /**
    * Call the actual API endpoint with the provided arguments
    * This is the equivalent of _call_api_endpoint from Python
    *
    * @param endpointName - Name of the endpoint to call
    * @param args - Arguments to pass to the API endpoint
+   * @param endUserId - Optional end user ID (who pays for the tool)
+   * @param developerId - Optional developer ID (who receives the payment)
    * @returns Dict containing success status, data, and message
    */
   async callApiEndpoint(
     endpointName: string,
-    args: Record<string, any>
+    args: Record<string, any>,
+    endUserId?: string,
+    developerId?: string
   ): Promise<ApiResponse> {
     if (!this.endpoints.has(endpointName)) {
       this.logger.error(`Endpoint '${endpointName}' not found`);
@@ -127,7 +308,33 @@ export class EndpointManager {
     const endpoint = this.endpoints.get(endpointName)!;
     this.logger.info(`Calling ${endpoint.method} ${endpoint.url}`, { args });
 
+    // DEBUG: Log all received parameters including _payment_id
+    this.logger.info(
+      `[DEBUG] Tool parameters received: ${JSON.stringify(args)}`
+    );
+    if (args._payment_id) {
+      this.logger.info(`[DEBUG] ✓ _payment_id present: ${args._payment_id}`);
+    } else {
+      this.logger.warning(`[DEBUG] ⚠️ _payment_id NOT present in parameters!`);
+    }
+
     try {
+      // Check if payment is required for this endpoint
+      if (endpoint.id && endUserId && developerId) {
+        const paymentCheckResult = await this.checkPaymentRequired(
+          endpoint.id,
+          endUserId, // End user who pays
+          developerId, // Developer who receives
+          args
+        );
+
+        if (paymentCheckResult) {
+          // Payment required but not satisfied - return 402
+          return paymentCheckResult;
+        }
+        // Payment verified or not required - continue with API call
+      }
+
       // Validate required parameters
       for (const param of endpoint.parameters) {
         if (param.required !== false && !(param.name in args)) {
