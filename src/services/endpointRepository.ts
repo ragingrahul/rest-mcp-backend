@@ -39,6 +39,14 @@ function toAPIEndpoint(record: any): APIEndpoint {
       record.endpoint_pricing.developer_wallet_address;
     endpoint.requires_payment =
       parseFloat(record.endpoint_pricing.price_per_call_eth) > 0;
+    // Also set is_paid for frontend compatibility
+    (endpoint as any).is_paid =
+      !!record.endpoint_pricing &&
+      parseFloat(record.endpoint_pricing.price_per_call_eth) > 0;
+  } else {
+    // Explicitly set to false/null when no pricing
+    endpoint.requires_payment = false;
+    (endpoint as any).is_paid = false;
   }
 
   return endpoint;
@@ -89,6 +97,7 @@ export async function updateEndpoint(
 ): Promise<APIEndpoint> {
   const client = accessToken ? getSupabaseWithAuth(accessToken) : supabase;
 
+  // Separate endpoint updates from pricing updates
   const updateData: any = {};
   if (updates.name !== undefined) updateData.name = updates.name;
   if (updates.url !== undefined) updateData.url = updates.url;
@@ -100,25 +109,105 @@ export async function updateEndpoint(
   if (updates.headers !== undefined) updateData.headers = updates.headers;
   if (updates.timeout !== undefined) updateData.timeout = updates.timeout;
 
-  const { data, error } = await client
-    .from("endpoints")
-    .update(updateData)
-    .eq("id", endpointId)
-    .eq("user_id", userId) // Ensure user owns the endpoint
-    .select()
-    .single();
+  // Update endpoint table if there are non-pricing updates
+  if (Object.keys(updateData).length > 0) {
+    const { data, error } = await client
+      .from("endpoints")
+      .update(updateData)
+      .eq("id", endpointId)
+      .eq("user_id", userId) // Ensure user owns the endpoint
+      .select()
+      .single();
 
-  if (error) {
-    log.error(`Failed to update endpoint: ${error.message}`, error);
-    throw new Error(`Failed to update endpoint: ${error.message}`);
+    if (error) {
+      log.error(`Failed to update endpoint: ${error.message}`, error);
+      throw new Error(`Failed to update endpoint: ${error.message}`);
+    }
+
+    if (!data) {
+      throw new Error("Endpoint not found or access denied");
+    }
   }
 
-  if (!data) {
+  // Handle pricing updates separately
+  const hasPricingUpdate =
+    updates.price_per_call_eth !== undefined ||
+    updates.developer_wallet_address !== undefined ||
+    (updates as any).is_paid !== undefined;
+
+  if (hasPricingUpdate) {
+    const isPaid = (updates as any).is_paid;
+
+    if (isPaid === false) {
+      // Remove pricing if is_paid is explicitly set to false
+      const { error: deleteError } = await client
+        .from("endpoint_pricing")
+        .delete()
+        .eq("endpoint_id", endpointId);
+
+      if (deleteError) {
+        log.warning(
+          `Failed to delete pricing: ${deleteError.message}`,
+          deleteError
+        );
+      }
+    } else if (
+      updates.price_per_call_eth !== undefined &&
+      updates.developer_wallet_address !== undefined
+    ) {
+      // Upsert pricing
+      const pricingData = {
+        endpoint_id: endpointId,
+        price_per_call_eth: updates.price_per_call_eth,
+        developer_wallet_address: updates.developer_wallet_address,
+      };
+
+      const { error: pricingError } = await client
+        .from("endpoint_pricing")
+        .upsert(pricingData, {
+          onConflict: "endpoint_id",
+        });
+
+      if (pricingError) {
+        log.error(
+          `Failed to update pricing: ${pricingError.message}`,
+          pricingError
+        );
+        throw new Error(`Failed to update pricing: ${pricingError.message}`);
+      }
+    }
+  }
+
+  // Fetch the updated endpoint with pricing
+  const { data: updatedEndpoint, error: fetchError } = await client
+    .from("endpoints")
+    .select(
+      `
+      *,
+      endpoint_pricing (
+        price_per_call_eth,
+        developer_wallet_address
+      )
+    `
+    )
+    .eq("id", endpointId)
+    .eq("user_id", userId)
+    .single();
+
+  if (fetchError) {
+    log.error(
+      `Failed to fetch updated endpoint: ${fetchError.message}`,
+      fetchError
+    );
+    throw new Error(`Failed to fetch updated endpoint: ${fetchError.message}`);
+  }
+
+  if (!updatedEndpoint) {
     throw new Error("Endpoint not found or access denied");
   }
 
   log.info(`Updated endpoint ${endpointId}`);
-  return toAPIEndpoint(data);
+  return toAPIEndpoint(updatedEndpoint);
 }
 
 /**
