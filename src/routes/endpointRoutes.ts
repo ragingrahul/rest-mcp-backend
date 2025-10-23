@@ -21,6 +21,11 @@ export function createEndpointRoutes(registry: MCPServerRegistry): Router {
   // Apply authentication middleware to all endpoint routes
   router.use(verifyToken);
 
+  // GET /api/endpoints/marketplace - Get all developers with endpoints (requires auth)
+  router.get("/marketplace", (req, res) => {
+    endpointController.getMarketplace(req, res);
+  });
+
   // POST /api/endpoints - Add a new endpoint (requires auth)
   router.post("/", (req, res) => {
     endpointController.addEndpoint(req, res, registry);

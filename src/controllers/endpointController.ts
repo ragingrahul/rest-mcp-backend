@@ -248,3 +248,115 @@ export async function updateEndpointController(
     });
   }
 }
+
+/**
+ * Get marketplace - list all developers with their endpoints
+ */
+export async function getMarketplace(
+  _req: Request,
+  res: Response
+): Promise<void> {
+  try {
+    // Import supabase here to avoid circular dependencies
+    const { supabase } = await import("../services/supabase.js");
+
+    // Fetch all endpoints from Supabase
+    const { data: endpoints, error: endpointsError } = await supabase
+      .from("endpoints")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (endpointsError) {
+      throw new Error(`Failed to fetch endpoints: ${endpointsError.message}`);
+    }
+
+    // Fetch all profiles
+    const { data: profiles, error: profilesError } = await supabase
+      .from("profiles")
+      .select("id, email, full_name");
+
+    if (profilesError) {
+      throw new Error(`Failed to fetch profiles: ${profilesError.message}`);
+    }
+
+    // Fetch all endpoint pricing
+    const { data: pricing, error: pricingError } = await supabase
+      .from("endpoint_pricing")
+      .select("endpoint_id, price_per_call_eth, developer_wallet_address");
+
+    if (pricingError) {
+      log.warning(`Failed to fetch pricing: ${pricingError.message}`);
+    } else {
+      log.info(`Fetched ${pricing?.length || 0} pricing records`);
+    }
+
+    // Create a map of user_id to profile
+    const profileMap = new Map(
+      profiles?.map((profile) => [profile.id, profile]) || []
+    );
+
+    // Create a map of endpoint_id to pricing
+    const pricingMap = new Map(pricing?.map((p) => [p.endpoint_id, p]) || []);
+
+    // Group endpoints by developer
+    const developerMap = new Map<string, any>();
+
+    endpoints?.forEach((endpoint: any) => {
+      const userId = endpoint.user_id;
+      const profile = profileMap.get(userId);
+
+      if (!developerMap.has(userId)) {
+        developerMap.set(userId, {
+          id: userId,
+          email: profile?.email || "Unknown",
+          full_name: profile?.full_name,
+          endpoints: [],
+          endpoint_count: 0,
+        });
+      }
+
+      const developer = developerMap.get(userId);
+      const endpointPricing = pricingMap.get(endpoint.id);
+
+      // Log pricing info for debugging
+      if (endpointPricing) {
+        log.info(
+          `Found pricing for endpoint ${endpoint.name}: ${endpointPricing.price_per_call_eth} ETH`
+        );
+      }
+
+      developer.endpoints.push({
+        id: endpoint.id,
+        name: endpoint.name,
+        description: endpoint.description,
+        url: endpoint.url,
+        method: endpoint.method,
+        user_id: endpoint.user_id,
+        created_at: endpoint.created_at,
+        updated_at: endpoint.updated_at,
+        is_paid: !!endpointPricing,
+        price_per_call_eth: endpointPricing?.price_per_call_eth || null,
+        developer_wallet_address:
+          endpointPricing?.developer_wallet_address || null,
+      });
+      developer.endpoint_count += 1;
+    });
+
+    const developers = Array.from(developerMap.values());
+
+    log.info(`Fetched marketplace with ${developers.length} developers`);
+
+    res.json({
+      success: true,
+      developers,
+      total_developers: developers.length,
+      total_endpoints: endpoints?.length || 0,
+    });
+  } catch (error: any) {
+    log.error(`Error fetching marketplace: ${error.message}`, error);
+    res.status(500).json({
+      success: false,
+      message: `Error fetching marketplace: ${error.message}`,
+    });
+  }
+}
